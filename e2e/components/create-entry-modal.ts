@@ -8,14 +8,23 @@ export class CreateEntryModal {
   }
 
   async fillTitle(title: string) {
-    await this.page
-      .getByRole('dialog', { name: 'Create an entry' })
-      .getByLabel('Title')
-      .fill(title)
+    await this.page.getByRole('dialog', { name: 'Create an entry' }).getByLabel('Title').fill(title)
   }
 
   async fillContent(content: string) {
     await this.page.getByLabel('Content').fill(content)
+  }
+
+  contentInput() {
+    return this.page.getByLabel('Content')
+  }
+
+  speakEntryButton() {
+    return this.page.getByRole('button', { name: 'Speak entry' })
+  }
+
+  async startVoiceInput() {
+    await this.speakEntryButton().click()
   }
 
   async fillEntryDate(date: string) {

@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { axe } from 'vitest-axe'
 
 import type { PendingInvitation } from '@/data/invitations'
 import { PendingInvitationRow } from '@/app/dashboard/pending-invitation-row'
@@ -37,7 +38,10 @@ describe('PendingInvitationRow', () => {
   })
 
   it('renders invitation details and action buttons', () => {
-    const acceptAction = vi.fn(async () => ({ error: null, redirectTo: '/dashboard/journals/journal-1' }))
+    const acceptAction = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
     const declineAction = vi.fn(async () => ({ error: null, success: true }))
 
     render(
@@ -50,13 +54,17 @@ describe('PendingInvitationRow', () => {
 
     expect(screen.getByText('Team Notes')).toBeInTheDocument()
     expect(screen.getByText(/Invited as editor/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Accept' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Decline' })).toBeInTheDocument()
   })
 
   it('accepts an invitation and navigates to returned route', async () => {
     const user = userEvent.setup()
-    const acceptAction = vi.fn(async () => ({ error: null, redirectTo: '/dashboard/journals/journal-1' }))
+    const acceptAction = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
     const declineAction = vi.fn(async () => ({ error: null, success: true }))
 
     render(
@@ -79,7 +87,10 @@ describe('PendingInvitationRow', () => {
 
   it('declines an invitation and refreshes the page', async () => {
     const user = userEvent.setup()
-    const acceptAction = vi.fn(async () => ({ error: null, redirectTo: '/dashboard/journals/journal-1' }))
+    const acceptAction = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
     const declineAction = vi.fn(async () => ({ error: null, success: true }))
 
     render(
@@ -102,7 +113,10 @@ describe('PendingInvitationRow', () => {
 
   it('shows accept error and does not navigate', async () => {
     const user = userEvent.setup()
-    const acceptAction = vi.fn(async () => ({ error: 'Invite is no longer valid.', redirectTo: null }))
+    const acceptAction = vi.fn(async () => ({
+      error: 'Invite is no longer valid.',
+      redirectTo: null,
+    }))
     const declineAction = vi.fn(async () => ({ error: null, success: true }))
 
     render(
@@ -143,13 +157,21 @@ describe('PendingInvitationRow', () => {
     })
 
     expect(pushMock).toHaveBeenCalledWith('/invitations/invite-token')
-    expect(screen.queryByText('You must be signed in with the invited email to accept this invitation.')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('You must be signed in with the invited email to accept this invitation.'),
+    ).not.toBeInTheDocument()
   })
 
   it('shows decline error and does not refresh', async () => {
     const user = userEvent.setup()
-    const acceptAction = vi.fn(async () => ({ error: null, redirectTo: '/dashboard/journals/journal-1' }))
-    const declineAction = vi.fn(async () => ({ error: 'Invite is no longer valid.', success: false }))
+    const acceptAction = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
+    const declineAction = vi.fn(async () => ({
+      error: 'Invite is no longer valid.',
+      success: false,
+    }))
 
     render(
       <PendingInvitationRow
@@ -168,10 +190,10 @@ describe('PendingInvitationRow', () => {
 
   it('shows Accepting... while accept action is in flight', async () => {
     const user = userEvent.setup()
-    let resolveAccept: ((value: { error: null, redirectTo: string }) => void) | null = null
+    let resolveAccept: ((value: { error: null; redirectTo: string }) => void) | null = null
     const acceptAction = vi.fn(
       () =>
-        new Promise<{ error: null, redirectTo: string }>((resolve) => {
+        new Promise<{ error: null; redirectTo: string }>((resolve) => {
           resolveAccept = resolve
         }),
     )
@@ -188,6 +210,7 @@ describe('PendingInvitationRow', () => {
     await user.click(screen.getByRole('button', { name: 'Accept' }))
 
     expect(screen.getByRole('button', { name: 'Accepting...' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled()
 
     expect(resolveAccept).not.toBeNull()
@@ -200,11 +223,14 @@ describe('PendingInvitationRow', () => {
 
   it('shows Declining... while decline action is in flight', async () => {
     const user = userEvent.setup()
-    let resolveDecline: ((value: { error: null, success: true }) => void) | null = null
-    const acceptAction = vi.fn(async () => ({ error: null, redirectTo: '/dashboard/journals/journal-1' }))
+    let resolveDecline: ((value: { error: null; success: true }) => void) | null = null
+    const acceptAction = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
     const declineAction = vi.fn(
       () =>
-        new Promise<{ error: null, success: true }>((resolve) => {
+        new Promise<{ error: null; success: true }>((resolve) => {
           resolveDecline = resolve
         }),
     )
@@ -220,6 +246,7 @@ describe('PendingInvitationRow', () => {
     await user.click(screen.getByRole('button', { name: 'Decline' }))
 
     expect(screen.getByRole('button', { name: 'Declining...' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Accept' })).toBeDisabled()
 
     expect(resolveDecline).not.toBeNull()
@@ -227,6 +254,23 @@ describe('PendingInvitationRow', () => {
 
     await waitFor(() => {
       expect(refreshMock).toHaveBeenCalled()
+    })
+  })
+
+  describe('accessibility', () => {
+    it('has no violations', async () => {
+      const acceptAction = vi.fn(async () => ({ error: null, redirectTo: null }))
+      const declineAction = vi.fn(async () => ({ error: null, success: true }))
+
+      const { container } = render(
+        <PendingInvitationRow
+          invitation={buildInvitation()}
+          acceptAction={acceptAction}
+          declineAction={declineAction}
+        />,
+      )
+
+      expect(await axe(container)).toHaveNoViolations()
     })
   })
 })

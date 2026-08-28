@@ -6,18 +6,24 @@ const {
   getCurrentAppUserMock,
   getCurrentUserEmailMock,
   getPendingInvitationsForEmailMock,
+  getFeatureRequestSurveyResponseForUserMock,
   getCollaboratorsForJournalsMock,
+  getRecentPhotosForJournalsMock,
   getUserJournalCountMock,
   getUserJournalsMock,
+  getLaunchDarklyVariationMock,
   createJournalForOwnerMock,
   redirectMock,
 } = vi.hoisted(() => ({
   getCurrentAppUserMock: vi.fn(),
   getCurrentUserEmailMock: vi.fn(),
   getPendingInvitationsForEmailMock: vi.fn(),
+  getFeatureRequestSurveyResponseForUserMock: vi.fn(),
   getCollaboratorsForJournalsMock: vi.fn(),
+  getRecentPhotosForJournalsMock: vi.fn(),
   getUserJournalCountMock: vi.fn(),
   getUserJournalsMock: vi.fn(),
+  getLaunchDarklyVariationMock: vi.fn(),
   createJournalForOwnerMock: vi.fn(),
   redirectMock: vi.fn(() => {
     throw new Error('NEXT_REDIRECT')
@@ -37,6 +43,18 @@ vi.mock('@/app/dashboard/create-journal-modal', () => ({
   ),
 }))
 
+vi.mock('@/app/dashboard/export-journals-button', () => ({
+  ExportJournalsButton: ({ children }: { children?: ReactNode }) => (
+    <div data-testid="export-journals-button">{children ?? 'Export journals button'}</div>
+  ),
+}))
+
+vi.mock('@/app/dashboard/feature-request-modal', () => ({
+  FeatureRequestModal: ({ children }: { children?: ReactNode }) => (
+    <div data-testid="feature-request-modal">{children ?? 'Feature request modal'}</div>
+  ),
+}))
+
 vi.mock('@/app/dashboard/delete-journal-button', () => ({
   DeleteJournalButton: ({ journalId }: { journalId: string }) => (
     <div data-testid={`delete-journal-${journalId}`}>Delete</div>
@@ -51,15 +69,37 @@ vi.mock('@/lib/get-current-user-email', () => ({
   getCurrentUserEmail: getCurrentUserEmailMock,
 }))
 
+vi.mock('@/lib/launchdarkly/server-client', () => ({
+  createLaunchDarklyContext: vi.fn((input) => input),
+  getLaunchDarklyVariation: getLaunchDarklyVariationMock,
+}))
+
 vi.mock('@/data/invitations', () => ({
   getPendingInvitationsForEmail: getPendingInvitationsForEmailMock,
 }))
 
+vi.mock('@/data/feature-requests', () => ({
+  getFeatureRequestSurveyResponseForUser: getFeatureRequestSurveyResponseForUserMock,
+}))
+
 vi.mock('@/data/journals', () => ({
   getCollaboratorsForJournals: getCollaboratorsForJournalsMock,
+  getRecentPhotosForJournals: getRecentPhotosForJournalsMock,
   getUserJournalCount: getUserJournalCountMock,
   getUserJournals: getUserJournalsMock,
   createJournalForOwner: createJournalForOwnerMock,
+}))
+
+vi.mock('@/data/exports', () => ({
+  buildOwnerJournalsExportPayload: vi.fn(),
+}))
+
+vi.mock('@/lib/journal-export', () => ({
+  createOwnerJournalsExportZipAndUpload: vi.fn(),
+}))
+
+vi.mock('@/lib/export-link-token', () => ({
+  createExportDownloadToken: vi.fn(),
 }))
 
 import DashboardPage from '@/app/dashboard/page'
@@ -80,7 +120,10 @@ describe('DashboardPage', () => {
     getUserJournalCountMock.mockResolvedValue(0)
     getUserJournalsMock.mockResolvedValue([])
     getCollaboratorsForJournalsMock.mockResolvedValue(new Map())
+    getRecentPhotosForJournalsMock.mockResolvedValue(new Map())
+    getLaunchDarklyVariationMock.mockResolvedValue(true)
     getPendingInvitationsForEmailMock.mockResolvedValue([])
+    getFeatureRequestSurveyResponseForUserMock.mockResolvedValue(null)
   })
 
   it('redirects to sign-in when no app user exists', async () => {
@@ -98,7 +141,38 @@ describe('DashboardPage', () => {
     expect(screen.getByRole('heading', { name: 'Your Journals' })).toBeInTheDocument()
     expect(screen.getByText('No journals found')).toBeInTheDocument()
     expect(screen.getByText('You are not a member of any journals yet.')).toBeInTheDocument()
+    expect(screen.getByTestId('feature-request-modal')).toBeInTheDocument()
     expect(screen.getByTestId('create-journal-modal')).toBeInTheDocument()
+    expect(screen.getByTestId('export-journals-button')).toBeInTheDocument()
+  })
+
+  it('hides feature request modal when the user already responded', async () => {
+    getFeatureRequestSurveyResponseForUserMock.mockResolvedValue({
+      id: 'feature-request-1',
+      status: 'dismissed',
+      requestText: null,
+    })
+
+    await renderDashboardPage()
+
+    expect(screen.queryByTestId('feature-request-modal')).not.toBeInTheDocument()
+  })
+
+  it('hides export button when owner journal export flag is disabled', async () => {
+    getLaunchDarklyVariationMock.mockResolvedValue(false)
+
+    await renderDashboardPage()
+
+    expect(screen.queryByTestId('export-journals-button')).not.toBeInTheDocument()
+    expect(screen.getByTestId('create-journal-modal')).toBeInTheDocument()
+  })
+
+  it('handles missing searchParams prop by defaulting to page 1', async () => {
+    const page = await DashboardPage({})
+    render(page)
+
+    expect(getUserJournalsMock).toHaveBeenCalledWith('user-1', { limit: 5, offset: 0 })
+    expect(screen.getByText('No journals found')).toBeInTheDocument()
   })
 
   it('renders pending invites and journal list for signed in user', async () => {
@@ -144,6 +218,7 @@ describe('DashboardPage', () => {
     expect(screen.getByRole('heading', { name: 'Pending invites' })).toBeInTheDocument()
     expect(screen.getByText('Shared Travel Notes')).toBeInTheDocument()
     expect(screen.getByText(/Invited as editor/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled()
 
     expect(screen.getByText('Family Journal')).toBeInTheDocument()
     expect(screen.getByText('Daily family reflections')).toBeInTheDocument()
@@ -206,7 +281,76 @@ describe('DashboardPage', () => {
 
     expect(getUserJournalsMock).toHaveBeenCalledWith('user-1', { limit: 5, offset: 5 })
     expect(screen.getByText('Page 2 of 2')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Previous' })).toHaveAttribute('href', '/dashboard?page=1')
+    expect(screen.getByRole('link', { name: 'Previous' })).toHaveAttribute(
+      'href',
+      '/dashboard?page=1',
+    )
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+
+  it('defaults to page 1 when the requested page param is not a number', async () => {
+    getUserJournalCountMock.mockResolvedValue(7)
+    getUserJournalsMock.mockResolvedValue([
+      {
+        id: 'journal-1',
+        title: 'Page One Journal 1',
+        description: null,
+        isOwner: true,
+      },
+      {
+        id: 'journal-2',
+        title: 'Page One Journal 2',
+        description: null,
+        isOwner: false,
+      },
+    ])
+
+    await renderDashboardPage({ page: 'abc' })
+
+    expect(getUserJournalsMock).toHaveBeenCalledWith('user-1', { limit: 5, offset: 0 })
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(screen.getByRole('link', { name: 'Next' })).toHaveAttribute('href', '/dashboard?page=2')
+  })
+
+  it('clamps a requested page above the total page count to the last page', async () => {
+    getUserJournalCountMock.mockResolvedValue(7)
+    getUserJournalsMock.mockResolvedValue([
+      {
+        id: 'journal-6',
+        title: 'Last Page Journal',
+        description: null,
+        isOwner: true,
+      },
+    ])
+
+    await renderDashboardPage({ page: '99' })
+
+    expect(getUserJournalsMock).toHaveBeenCalledWith('user-1', { limit: 5, offset: 5 })
+    expect(screen.getByText('Page 2 of 2')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Previous' })).toHaveAttribute(
+      'href',
+      '/dashboard?page=1',
+    )
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  })
+
+  it('defaults to page 1 when the requested page param is below 1', async () => {
+    getUserJournalCountMock.mockResolvedValue(7)
+    getUserJournalsMock.mockResolvedValue([
+      {
+        id: 'journal-1',
+        title: 'First Page Journal',
+        description: null,
+        isOwner: true,
+      },
+    ])
+
+    await renderDashboardPage({ page: '0' })
+
+    expect(getUserJournalsMock).toHaveBeenCalledWith('user-1', { limit: 5, offset: 0 })
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(screen.getByRole('link', { name: 'Next' })).toHaveAttribute('href', '/dashboard?page=2')
   })
 })

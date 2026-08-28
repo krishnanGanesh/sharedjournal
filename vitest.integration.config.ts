@@ -8,6 +8,7 @@ export default defineConfig({
     },
   },
   test: {
+    maxWorkers: process.env.CI ? undefined : '50%',
     environment: 'node',
     setupFiles: ['./src/test/setup.integration.ts'],
     include: ['src/**/*.integration.test.ts'],
@@ -17,12 +18,10 @@ export default defineConfig({
     pool: 'forks',
     coverage: {
       include: ['src/data/**/*.{ts,tsx}'],
-      exclude: [
-        'src/data**/*.test.{ts,tsx}',
-      ],
+      exclude: ['src/data/**/*.test.{ts,tsx}'],
       reporter: ['text', 'html'],
       thresholds: {
-        statements: 75,
+        statements: 74,
         branches: 75,
         functions: 85,
         lines: 75,

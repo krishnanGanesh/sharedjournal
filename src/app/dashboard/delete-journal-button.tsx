@@ -1,12 +1,10 @@
 'use client'
 
+import type { ReactNode } from 'react'
 import { useRouter } from 'next/navigation'
 import { useState, useTransition } from 'react'
 
-import {
-  type DeleteJournalInput,
-  type DeleteJournalState,
-} from '@/app/dashboard/actions'
+import { type DeleteJournalInput, type DeleteJournalState } from '@/app/dashboard/actions'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -22,16 +20,47 @@ type DeleteJournalButtonProps = {
   journalId: string
   action: (input: DeleteJournalInput) => Promise<DeleteJournalState>
   successRedirectTo?: string
+  trigger?: ReactNode
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
 }
 
-export function DeleteJournalButton({ journalId, action, successRedirectTo }: DeleteJournalButtonProps) {
+export function DeleteJournalButton({
+  journalId,
+  action,
+  successRedirectTo,
+  trigger,
+  open: controlledOpen,
+  onOpenChange,
+}: DeleteJournalButtonProps) {
   const router = useRouter()
-  const [open, setOpen] = useState(false)
+  const [internalOpen, setInternalOpen] = useState(false)
   const [state, setState] = useState<DeleteJournalState>({
     error: null,
     success: false,
   })
   const [pending, startTransition] = useTransition()
+  const open = controlledOpen ?? internalOpen
+
+  function setOpen(nextOpen: boolean) {
+    if (onOpenChange) {
+      onOpenChange(nextOpen)
+      return
+    }
+
+    setInternalOpen(nextOpen)
+  }
+
+  function handleOpenChange(nextOpen: boolean) {
+    setOpen(nextOpen)
+
+    if (nextOpen) {
+      setState({
+        error: null,
+        success: false,
+      })
+    }
+  }
 
   function handleDelete() {
     startTransition(async () => {
@@ -52,17 +81,27 @@ export function DeleteJournalButton({ journalId, action, successRedirectTo }: De
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button type="button" size="sm" variant="outline" className="text-destructive hover:text-destructive">
-          Delete
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      {trigger ? (
+        <DialogTrigger asChild>{trigger}</DialogTrigger>
+      ) : controlledOpen !== undefined ? null : (
+        <DialogTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="text-destructive hover:text-destructive"
+          >
+            Delete journal
+          </Button>
+        </DialogTrigger>
+      )}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete journal</DialogTitle>
           <DialogDescription>
-            This will permanently remove this journal and all of its entries. This action cannot be undone.
+            This will permanently remove this journal and all of its entries. This action cannot be
+            undone.
           </DialogDescription>
         </DialogHeader>
         {state.error ? <p className="text-destructive text-sm">{state.error}</p> : null}
@@ -71,7 +110,7 @@ export function DeleteJournalButton({ journalId, action, successRedirectTo }: De
             Cancel
           </Button>
           <Button type="button" onClick={handleDelete} disabled={pending}>
-            {pending ? 'Deleting...' : 'Delete'}
+            {pending ? 'Deleting...' : 'Delete journal'}
           </Button>
         </DialogFooter>
       </DialogContent>

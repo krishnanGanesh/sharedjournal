@@ -16,6 +16,14 @@ You can start editing the page by modifying `src/app/page.tsx`. The page auto-up
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Code Quality
+
+- Run lint checks: `npm run lint`
+- Format all files: `npm run format`
+- Check formatting in CI or pre-commit: `npm run format:check`
+
+ESLint is used for code-quality and correctness checks, while Prettier handles code formatting.
+
 ## Setup
 
 ### Environment Variables
@@ -23,9 +31,19 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 Create a `.env.local` file in the root of your project with the following variables:
 
 ```bash
+cp .env.example .env.local
+```
+
+```bash
 # Clerk Authentication
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
 CLERK_SECRET_KEY=sk_test_...
+
+# LaunchDarkly feature flags (server-side)
+LAUNCHDARKLY_SDK_KEY=sdk-...
+
+# Optional: LaunchDarkly client-side id (for future client SDK usage)
+NEXT_PUBLIC_LAUNCHDARKLY_CLIENT_SIDE_ID=...
 
 # Database (Neon/PostgreSQL)
 DATABASE_URL=postgresql://user:password@host:port/database
@@ -42,7 +60,142 @@ NEXT_PUBLIC_APP_URL=http://localhost:3000
 INVITE_EMAIL_PROVIDER=resend
 RESEND_API_KEY=re_...
 RESEND_FROM_EMAIL=SharedJournal <invites@notify.sharedjournal.app>
+
+# Support payments (Stripe)
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
 ```
+
+### Content Moderation Quickstart
+
+SharedJournal can moderate entry and reflection content before writing to the database.
+
+Add these variables to `.env.local` to enable moderation locally:
+
+```bash
+# Content moderation
+CONTENT_MODERATION_ENABLED=true
+CONTENT_MODERATION_PROVIDER=openai
+CONTENT_MODERATION_API_KEY=sk-...
+
+# Behavior when provider is unavailable:
+# open   -> allow writes (default)
+# closed -> block writes and return retry message
+CONTENT_MODERATION_FAIL_MODE=open
+```
+
+Behavior summary:
+
+- `CONTENT_MODERATION_ENABLED` must be exactly `true` to enforce moderation.
+- With `CONTENT_MODERATION_FAIL_MODE=open`, provider errors allow writes.
+- With `CONTENT_MODERATION_FAIL_MODE=closed`, provider errors block writes with a generic retry error.
+- Moderation runs before encryption and persistence for entry creation and reflection creation.
+
+For full implementation details, see `docs/content-moderation-implementation.md`.
+
+### Stripe Integration (Support Payments)
+
+SharedJournal supports optional one-time "buy me a coffee" style contributions via Stripe Checkout.
+
+#### What is implemented
+
+- Support page: `/support`
+- Checkout creation: server action in `src/app/support/actions.ts`
+- Webhook endpoint: `/api/webhooks/stripe`
+- Success page: `/support/success`
+- Payment records stored in `support_payments`
+
+#### Required Stripe events
+
+Configure these events for your webhook endpoint:
+
+- `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+- `checkout.session.async_payment_failed`
+- `checkout.session.expired`
+
+#### Local development setup
+
+1. Ensure your Stripe test key is configured:
+
+- `STRIPE_SECRET_KEY=sk_test_...`
+
+2. Start the app:
+
+```bash
+npm run dev
+```
+
+3. In a separate terminal, start Stripe CLI forwarding:
+
+```bash
+stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired --forward-to http://localhost:3000/api/webhooks/stripe
+```
+
+4. Copy the webhook signing secret printed by Stripe CLI (`whsec_...`) and set:
+
+- `STRIPE_WEBHOOK_SECRET=whsec_...`
+
+Notes:
+
+- For local testing with Stripe CLI, you do not need to manually create a webhook endpoint in the Stripe Dashboard.
+- Use Stripe test cards in Checkout, for example `4242 4242 4242 4242`.
+
+#### Production / Preview setup
+
+For deployed environments (Vercel preview or production):
+
+1. Create a Stripe webhook endpoint in Dashboard for each environment URL:
+
+- `https://<your-domain>/api/webhooks/stripe`
+
+2. Subscribe it to the required events listed above.
+3. Use that endpoint's signing secret as `STRIPE_WEBHOOK_SECRET` in that environment.
+
+Important:
+
+- Webhook secrets are endpoint-specific.
+- Local Stripe CLI `whsec_...` is different from production/preview dashboard endpoint secrets.
+- Keep test and live credentials separated (`sk_test_...` vs `sk_live_...`).
+
+#### Migration requirement
+
+Stripe support payments require the `support_payments` table migration. Run:
+
+```bash
+npm run db:migrate
+```
+
+before testing checkout.
+
+### LaunchDarkly Feature Flags
+
+SharedJournal now includes a server-side LaunchDarkly helper at `src/lib/launchdarkly/server-client.ts`.
+
+Basic usage in a Server Component or Server Action:
+
+```tsx
+import {
+  createLaunchDarklyContext,
+  getLaunchDarklyVariation,
+} from '@/lib/launchdarkly/server-client'
+
+const context = createLaunchDarklyContext({
+  key: appUser.id,
+  name: appUser.displayName,
+})
+
+const isNewExperienceEnabled = await getLaunchDarklyVariation({
+  flagKey: 'new-experience',
+  context,
+  fallback: false,
+})
+```
+
+Notes:
+
+- Feature-flag evaluation should happen in Server Components / Server Actions.
+- `LAUNCHDARKLY_SDK_KEY` must be set in your environment for the helper to initialize.
 
 ### Clerk Authentication
 
@@ -187,7 +340,6 @@ Or use the default Claude model:
 ollama launch claude
 ```
 
-
 ### Installing Neon MCP Server
 
 The Neon Model Context Protocol (MCP) server allows you to interact with your Neon PostgreSQL databases using natural language through AI assistants like Claude Code.
@@ -201,6 +353,7 @@ npx neonctl@latest init
 ```
 
 This will:
+
 - Authenticate via OAuth
 - Create a Neon API key automatically
 - Configure your MCP client (Claude Code, VS Code, Cursor)
@@ -208,24 +361,27 @@ This will:
 #### Manual Setup with Ollama
 
 1. **Configure Claude Code MCP servers**:
+
    ```bash
    ollama launch claude --config
    ```
+
    This will open an interactive configuration menu.
 
 2. **Add Neon MCP to your MCP configuration**:
-   
+
    After configuring Ollama, you'll need to add Neon to your MCP servers configuration file. The easiest way is using the remote hosted server:
-   
+
    ```bash
    npx add-mcp https://mcp.neon.tech/mcp
    ```
 
 3. **Alternative: Manual MCP Configuration**:
-   
+
    Create or edit your MCP configuration file (location varies by tool):
-   
+
    **Remote MCP Server (OAuth - No API Key Needed)**:
+
    ```json
    {
      "mcpServers": {
@@ -240,6 +396,7 @@ This will:
 #### Using Neon MCP
 
 Once configured, you can use natural language commands like:
+
 - "Create a new Postgres database called 'my-database'"
 - "Show me all my Neon projects"
 - "Run a migration on my project to add a created_at column"
@@ -247,10 +404,12 @@ Once configured, you can use natural language commands like:
 ### Documentation
 
 For more information, visit:
+
 - [Neon MCP Server Guide](https://neon.tech/docs/ai/neon-mcp-server)
 - [Neon MCP GitHub](https://github.com/neondatabase/mcp-server-neon)
 - [Ollama Documentation](https://docs.ollama.com)
 - [Model Context Protocol](https://modelcontextprotocol.io)
 
 ### Note:
+
 Created with the help of this udemy course: [Course](https://sdg.udemy.com/course/learn-claude-code/learn/lecture/54834735#overview)

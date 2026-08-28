@@ -6,12 +6,19 @@ import { revalidatePath } from 'next/cache'
 import { headers } from 'next/headers'
 import { z } from 'zod'
 
-import { createEntryWithUploadedImagesForJournal } from '@/data/entries'
+import { canUserCommentOnEntry, createEntryComment } from '@/data/comments'
+import { createEntryWithUploadedImagesForJournal, deleteEntryForJournal } from '@/data/entries'
 import {
   createJournalInvitation,
+  revokeJournalInvitationByOwner,
   setInvitationEmailDeliveryFlag,
 } from '@/data/invitations'
-import { getUserJournalById, updateJournalTitleForOwner } from '@/data/journals'
+import { getUserJournalById, updateJournalDetailsForOwner } from '@/data/journals'
+import {
+  createLaunchDarklyContext,
+  getLaunchDarklyVariation,
+} from '@/lib/launchdarkly/server-client'
+import { moderateContent } from '@/lib/content-moderation'
 import { ENTRY_IMAGE_ALLOWED_MIME_TYPES, ENTRY_IMAGE_MAX_FILES } from '@/lib/entry-image-constants'
 import { isTempEntryImageStorageKeyForJournal } from '@/lib/entry-image-storage'
 import { getCurrentAppUser } from '@/lib/get-current-app-user'
@@ -48,15 +55,42 @@ export type CleanupEntryImageUploadsState = {
   error: string | null
 }
 
+export type DeleteEntryInput = {
+  journalId: string
+  entryId: string
+}
+
+export type DeleteEntryState = {
+  error: string | null
+  success: boolean
+}
+
 export type InviteUserInput = {
   journalId: string
   journalTitle: string
   email: string
 }
 
-export type UpdateJournalTitleInput = {
+export type AddCommentInput = {
+  journalId: string
+  entryId: string
+  content: string
+}
+
+export type AddCommentState = {
+  error: string | null
+  success: boolean
+}
+
+export type UpdateJournalDetailsInput = {
   journalId: string
   title: string
+  description: string
+}
+
+export type CancelPendingInvitationInput = {
+  journalId: string
+  invitationId: string
 }
 
 export type InviteActionState = {
@@ -65,8 +99,13 @@ export type InviteActionState = {
   inviteLink: string | null
 }
 
-export type UpdateJournalTitleState = {
+export type UpdateJournalDetailsState = {
   error: string | null
+}
+
+export type CancelPendingInvitationState = {
+  error: string | null
+  success: boolean
 }
 
 const createEntrySchema = z.object({
@@ -103,20 +142,51 @@ const cleanupEntryImageUploadsSchema = z.object({
     .max(ENTRY_IMAGE_MAX_FILES, `You can upload up to ${ENTRY_IMAGE_MAX_FILES} images per entry.`),
 })
 
+const deleteEntrySchema = z.object({
+  journalId: z.string().uuid('Invalid journal id.'),
+  entryId: z.string().uuid('Invalid entry id.'),
+})
+
 const inviteUserSchema = z.object({
   journalId: z.string().trim().min(1, 'Journal is required.'),
   journalTitle: z.string().trim().min(1, 'Journal title is required.'),
-  email: z.string().trim().email('Please provide a valid email address.').transform((value) => value.toLowerCase()),
+  email: z
+    .string()
+    .trim()
+    .email('Please provide a valid email address.')
+    .transform((value) => value.toLowerCase()),
 })
 
-const updateJournalTitleSchema = z.object({
+const addCommentSchema = z.object({
+  journalId: z.string().uuid('Invalid journal id.'),
+  entryId: z.string().uuid('Invalid entry id.'),
+  content: z
+    .string()
+    .trim()
+    .min(1, 'Reflection is required.')
+    .max(2000, 'Reflection must be 2000 characters or less.'),
+})
+
+const updateJournalDetailsSchema = z.object({
   journalId: z.string().trim().min(1, 'Journal is required.'),
   title: z
     .string()
     .trim()
     .min(1, 'Title is required.')
     .max(JOURNAL_TITLE_MAX_LENGTH, 'Title must be 180 characters or less.'),
+  description: z.string().trim().max(2000, 'Description must be 2000 characters or less.'),
 })
+
+const cancelPendingInvitationSchema = z.object({
+  journalId: z.string().trim().min(1, 'Journal is required.'),
+  invitationId: z.string().trim().min(1, 'Invitation is required.'),
+})
+
+const MODERATION_BLOCKED_ENTRY_ERROR =
+  'Your entry could not be saved because it violates our content guidelines.'
+const MODERATION_BLOCKED_COMMENT_ERROR =
+  'Your reflection could not be posted because it violates our content guidelines.'
+const MODERATION_RETRY_ERROR = 'We could not process your request right now. Please try again.'
 
 function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim()
@@ -152,12 +222,14 @@ async function getAppBaseUrl(): Promise<string> {
     return normalizeBaseUrl(requestOrigin)
   }
 
-  const requestHost = getFirstHeaderValue(requestHeaders.get('x-forwarded-host'))
-    ?? getFirstHeaderValue(requestHeaders.get('host'))
+  const requestHost =
+    getFirstHeaderValue(requestHeaders.get('x-forwarded-host')) ??
+    getFirstHeaderValue(requestHeaders.get('host'))
 
   if (requestHost) {
-    const requestProtocol = getFirstHeaderValue(requestHeaders.get('x-forwarded-proto'))
-      ?? (requestHost.includes('localhost') ? 'http' : 'https')
+    const requestProtocol =
+      getFirstHeaderValue(requestHeaders.get('x-forwarded-proto')) ??
+      (requestHost.includes('localhost') ? 'http' : 'https')
 
     return `${requestProtocol}://${requestHost}`
   }
@@ -175,9 +247,25 @@ async function getAppBaseUrl(): Promise<string> {
   return 'http://localhost:3000'
 }
 
-export async function createEntryAction(
-  input: CreateEntryInput,
-): Promise<CreateEntryState> {
+async function getRequestCorrelationId(): Promise<string | undefined> {
+  try {
+    const requestHeaders = await headers()
+
+    if (!requestHeaders || typeof requestHeaders.get !== 'function') {
+      return undefined
+    }
+
+    return (
+      getFirstHeaderValue(requestHeaders.get('x-request-id')) ??
+      getFirstHeaderValue(requestHeaders.get('x-vercel-id')) ??
+      undefined
+    )
+  } catch {
+    return undefined
+  }
+}
+
+export async function createEntryAction(input: CreateEntryInput): Promise<CreateEntryState> {
   const currentUser = await getCurrentAppUser()
 
   if (!currentUser) {
@@ -196,13 +284,40 @@ export async function createEntryAction(
     }
   }
 
+  const journal = await getUserJournalById(currentUser.id, parsedInput.data.journalId)
+
+  if (!journal) {
+    return {
+      error: 'You do not have permission to add entries to this journal.',
+      redirectTo: null,
+    }
+  }
+
   const hasInvalidStorageKey = parsedInput.data.uploadedImages.some(
-    (image) => !isTempEntryImageStorageKeyForJournal(image.tempStorageKey, parsedInput.data.journalId),
+    (image) =>
+      !isTempEntryImageStorageKeyForJournal(image.tempStorageKey, parsedInput.data.journalId),
   )
 
   if (hasInvalidStorageKey) {
     return {
       error: 'One or more uploaded images are invalid for this journal.',
+      redirectTo: null,
+    }
+  }
+
+  const moderationResult = await moderateContent({
+    content: parsedInput.data.content,
+    contentType: 'entry',
+    actionName: 'createEntryAction',
+    requestId: await getRequestCorrelationId(),
+  })
+
+  if (moderationResult.decision !== 'allow') {
+    return {
+      error:
+        moderationResult.reasonCode === 'provider_error_fail_closed'
+          ? MODERATION_RETRY_ERROR
+          : MODERATION_BLOCKED_ENTRY_ERROR,
       redirectTo: null,
     }
   }
@@ -279,9 +394,47 @@ export async function cleanupEntryImageUploadsAction(
   }
 }
 
-export async function createInviteAction(
-  input: InviteUserInput,
-): Promise<InviteActionState> {
+export async function deleteEntryAction(input: DeleteEntryInput): Promise<DeleteEntryState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to delete an entry.',
+      success: false,
+    }
+  }
+
+  const parsedInput = deleteEntrySchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to delete entry.',
+      success: false,
+    }
+  }
+
+  const deleted = await deleteEntryForJournal({
+    userId: currentUser.id,
+    journalId: parsedInput.data.journalId,
+    entryId: parsedInput.data.entryId,
+  })
+
+  if (!deleted) {
+    return {
+      error: 'Entry not found or you do not have permission to delete it.',
+      success: false,
+    }
+  }
+
+  revalidatePath(`/dashboard/journals/${parsedInput.data.journalId}`)
+
+  return {
+    error: null,
+    success: true,
+  }
+}
+
+export async function createInviteAction(input: InviteUserInput): Promise<InviteActionState> {
   const currentUser = await getCurrentAppUser()
 
   if (!currentUser) {
@@ -344,9 +497,96 @@ export async function createInviteAction(
   }
 }
 
-export async function updateJournalTitleAction(
-  input: UpdateJournalTitleInput,
-): Promise<UpdateJournalTitleState> {
+export async function addCommentAction(input: AddCommentInput): Promise<AddCommentState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to reflect.',
+      success: false,
+    }
+  }
+
+  // Check if comments feature is enabled
+  const ldContext = createLaunchDarklyContext({
+    key: currentUser.id,
+  })
+  const isCommentsFeatureEnabled = await getLaunchDarklyVariation({
+    flagKey: 'entry-comments',
+    context: ldContext,
+    fallback: false,
+  })
+
+  if (!isCommentsFeatureEnabled) {
+    return {
+      error: 'Reflections are not available at this time.',
+      success: false,
+    }
+  }
+
+  const parsedInput = addCommentSchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to add reflection.',
+      success: false,
+    }
+  }
+
+  const canComment = await canUserCommentOnEntry({
+    entryId: parsedInput.data.entryId,
+    journalId: parsedInput.data.journalId,
+    userId: currentUser.id,
+  })
+
+  if (!canComment) {
+    return {
+      error: 'You do not have permission to reflect on this entry.',
+      success: false,
+    }
+  }
+
+  const moderationResult = await moderateContent({
+    content: parsedInput.data.content,
+    contentType: 'comment',
+    actionName: 'addCommentAction',
+    requestId: await getRequestCorrelationId(),
+  })
+
+  if (moderationResult.decision !== 'allow') {
+    return {
+      error:
+        moderationResult.reasonCode === 'provider_error_fail_closed'
+          ? MODERATION_RETRY_ERROR
+          : MODERATION_BLOCKED_COMMENT_ERROR,
+      success: false,
+    }
+  }
+
+  const comment = await createEntryComment({
+    entryId: parsedInput.data.entryId,
+    authorUserId: currentUser.id,
+    content: parsedInput.data.content,
+  })
+
+  if (!comment) {
+    return {
+      error: 'You do not have permission to reflect on this entry.',
+      success: false,
+    }
+  }
+
+  revalidatePath(`/dashboard/journals/${comment.journalId}`)
+
+  return {
+    error: null,
+    success: true,
+  }
+}
+
+export async function updateJournalDetailsAction(
+  input: UpdateJournalDetailsInput,
+): Promise<UpdateJournalDetailsState> {
   const currentUser = await getCurrentAppUser()
 
   if (!currentUser) {
@@ -355,18 +595,19 @@ export async function updateJournalTitleAction(
     }
   }
 
-  const parsedInput = updateJournalTitleSchema.safeParse(input)
+  const parsedInput = updateJournalDetailsSchema.safeParse(input)
 
   if (!parsedInput.success) {
     return {
-      error: parsedInput.error.issues[0]?.message ?? 'Unable to update journal title.',
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to update journal.',
     }
   }
 
-  const updated = await updateJournalTitleForOwner({
+  const updated = await updateJournalDetailsForOwner({
     ownerUserId: currentUser.id,
     journalId: parsedInput.data.journalId,
     title: parsedInput.data.title,
+    description: parsedInput.data.description || null,
   })
 
   if (!updated) {
@@ -379,5 +620,47 @@ export async function updateJournalTitleAction(
 
   return {
     error: null,
+  }
+}
+
+export async function cancelPendingInvitationAction(
+  input: CancelPendingInvitationInput,
+): Promise<CancelPendingInvitationState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to cancel invitations.',
+      success: false,
+    }
+  }
+
+  const parsedInput = cancelPendingInvitationSchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to cancel invitation.',
+      success: false,
+    }
+  }
+
+  const result = await revokeJournalInvitationByOwner({
+    ownerUserId: currentUser.id,
+    journalId: parsedInput.data.journalId,
+    invitationId: parsedInput.data.invitationId,
+  })
+
+  if (!result.ok) {
+    return {
+      error: result.message,
+      success: false,
+    }
+  }
+
+  revalidatePath(`/dashboard/journals/${parsedInput.data.journalId}`)
+
+  return {
+    error: null,
+    success: true,
   }
 }

@@ -8,6 +8,7 @@ export default defineConfig({
     },
   },
   test: {
+    maxWorkers: process.env.CI ? undefined : '50%',
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
@@ -24,7 +25,7 @@ export default defineConfig({
         'src/proxy.ts',
         'src/db/seed.ts',
         'src/db/schema.ts',
-        'src/data/**'
+        'src/data/**',
       ],
       reporter: ['text', 'html'],
       thresholds: {

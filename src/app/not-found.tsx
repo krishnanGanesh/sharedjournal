@@ -1,17 +1,12 @@
 import Link from 'next/link'
 
+import { PageFlairShell } from '@/components/page-flair-shell'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
 export default function NotFound() {
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
+    <PageFlairShell contentClassName="flex min-h-screen max-w-4xl items-center justify-center py-8">
       <Card className="w-full max-w-md text-center">
         <CardHeader>
           <CardTitle className="text-4xl font-bold">404</CardTitle>
@@ -26,6 +21,6 @@ export default function NotFound() {
           </Button>
         </CardContent>
       </Card>
-    </div>
+    </PageFlairShell>
   )
 }

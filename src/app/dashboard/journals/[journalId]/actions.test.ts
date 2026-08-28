@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
   getClerkCurrentUserMock,
+  canUserCommentOnEntryMock,
   createEntryWithUploadedImagesForJournalMock,
+  createEntryCommentMock,
+  deleteEntryForJournalMock,
   createJournalInvitationMock,
-  updateJournalTitleForOwnerMock,
+  updateJournalDetailsForOwnerMock,
   setInvitationEmailDeliveryFlagMock,
   delMock,
   getCurrentAppUserMock,
@@ -12,11 +15,16 @@ const {
   sendInviteEmailMock,
   revalidatePathMock,
   headersMock,
+  getLaunchDarklyVariationMock,
+  moderateContentMock,
 } = vi.hoisted(() => ({
   getClerkCurrentUserMock: vi.fn(),
+  canUserCommentOnEntryMock: vi.fn(),
   createEntryWithUploadedImagesForJournalMock: vi.fn(),
+  createEntryCommentMock: vi.fn(),
+  deleteEntryForJournalMock: vi.fn(),
   createJournalInvitationMock: vi.fn(),
-  updateJournalTitleForOwnerMock: vi.fn(),
+  updateJournalDetailsForOwnerMock: vi.fn(),
   setInvitationEmailDeliveryFlagMock: vi.fn(),
   delMock: vi.fn(),
   getCurrentAppUserMock: vi.fn(),
@@ -24,6 +32,8 @@ const {
   sendInviteEmailMock: vi.fn(),
   revalidatePathMock: vi.fn(),
   headersMock: vi.fn(),
+  getLaunchDarklyVariationMock: vi.fn(),
+  moderateContentMock: vi.fn(),
 }))
 
 vi.mock('@clerk/nextjs/server', () => ({
@@ -36,6 +46,12 @@ vi.mock('@vercel/blob', () => ({
 
 vi.mock('@/data/entries', () => ({
   createEntryWithUploadedImagesForJournal: createEntryWithUploadedImagesForJournalMock,
+  deleteEntryForJournal: deleteEntryForJournalMock,
+}))
+
+vi.mock('@/data/comments', () => ({
+  canUserCommentOnEntry: canUserCommentOnEntryMock,
+  createEntryComment: createEntryCommentMock,
 }))
 
 vi.mock('@/data/invitations', () => ({
@@ -45,7 +61,7 @@ vi.mock('@/data/invitations', () => ({
 
 vi.mock('@/data/journals', () => ({
   getUserJournalById: getUserJournalByIdMock,
-  updateJournalTitleForOwner: updateJournalTitleForOwnerMock,
+  updateJournalDetailsForOwner: updateJournalDetailsForOwnerMock,
 }))
 
 vi.mock('@/lib/get-current-app-user', () => ({
@@ -64,21 +80,36 @@ vi.mock('next/headers', () => ({
   headers: headersMock,
 }))
 
+vi.mock('@/lib/launchdarkly/server-client', () => ({
+  createLaunchDarklyContext: vi.fn((input) => input),
+  getLaunchDarklyVariation: getLaunchDarklyVariationMock,
+}))
+
+vi.mock('@/lib/content-moderation', () => ({
+  moderateContent: moderateContentMock,
+}))
+
 import {
+  addCommentAction,
   cleanupEntryImageUploadsAction,
   createEntryAction,
   createInviteAction,
-  updateJournalTitleAction,
+  deleteEntryAction,
+  updateJournalDetailsAction,
 } from '@/app/dashboard/journals/[journalId]/actions'
 
 const originalAppUrl = process.env.NEXT_PUBLIC_APP_URL
 const originalServerAppUrl = process.env.APP_URL
 const originalVercelUrl = process.env.VERCEL_URL
 const originalVercelProductionUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
+const VALID_JOURNAL_ID = '4f687c5a-6576-4e05-a0f8-e4cdfdebe295'
+const VALID_ENTRY_ID = '26a0908b-c293-43f5-94c0-9b5d53fcc592'
 
 describe('createEntryAction', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    getUserJournalByIdMock.mockResolvedValue({ id: 'journal-1' })
+    moderateContentMock.mockResolvedValue({ decision: 'allow' })
   })
 
   it('returns an auth error when the user is signed out', async () => {
@@ -130,6 +161,25 @@ describe('createEntryAction', () => {
       error: 'You do not have permission to add entries to this journal.',
       redirectTo: null,
     })
+  })
+
+  it('returns a permission error before moderation when the user cannot access the journal', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    getUserJournalByIdMock.mockResolvedValue(null)
+
+    const result = await createEntryAction({
+      journalId: 'journal-1',
+      title: 'Morning Reflection',
+      content: 'Notes',
+      entryDate: '2026-03-14',
+    })
+
+    expect(result).toEqual({
+      error: 'You do not have permission to add entries to this journal.',
+      redirectTo: null,
+    })
+    expect(moderateContentMock).not.toHaveBeenCalled()
+    expect(createEntryWithUploadedImagesForJournalMock).not.toHaveBeenCalled()
   })
 
   it('trims entry values and returns the journal redirect path on success', async () => {
@@ -203,6 +253,48 @@ describe('createEntryAction', () => {
     })
     expect(createEntryWithUploadedImagesForJournalMock).not.toHaveBeenCalled()
   })
+
+  it('blocks entry creation when moderation disallows content', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    moderateContentMock.mockResolvedValue({
+      decision: 'block',
+      reasonCode: 'policy_violation',
+    })
+
+    const result = await createEntryAction({
+      journalId: 'journal-1',
+      title: 'Morning Reflection',
+      content: 'disallowed text',
+      entryDate: '2026-03-14',
+    })
+
+    expect(result).toEqual({
+      error: 'Your entry could not be saved because it violates our content guidelines.',
+      redirectTo: null,
+    })
+    expect(createEntryWithUploadedImagesForJournalMock).not.toHaveBeenCalled()
+  })
+
+  it('returns retry error when moderation provider fails in fail-closed mode', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    moderateContentMock.mockResolvedValue({
+      decision: 'block',
+      reasonCode: 'provider_error_fail_closed',
+    })
+
+    const result = await createEntryAction({
+      journalId: 'journal-1',
+      title: 'Morning Reflection',
+      content: 'normal text',
+      entryDate: '2026-03-14',
+    })
+
+    expect(result).toEqual({
+      error: 'We could not process your request right now. Please try again.',
+      redirectTo: null,
+    })
+    expect(createEntryWithUploadedImagesForJournalMock).not.toHaveBeenCalled()
+  })
 })
 
 describe('cleanupEntryImageUploadsAction', () => {
@@ -248,6 +340,80 @@ describe('cleanupEntryImageUploadsAction', () => {
 
     expect(delMock).toHaveBeenCalledWith(['tmp/journals/journal-1/image.jpg'])
     expect(result).toEqual({ error: null })
+  })
+})
+
+describe('deleteEntryAction', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('returns an auth error when the user is signed out', async () => {
+    getCurrentAppUserMock.mockResolvedValue(null)
+
+    const result = await deleteEntryAction({
+      journalId: '4f687c5a-6576-4e05-a0f8-e4cdfdebe295',
+      entryId: '26a0908b-c293-43f5-94c0-9b5d53fcc592',
+    })
+
+    expect(result).toEqual({
+      error: 'You must be signed in to delete an entry.',
+      success: false,
+    })
+    expect(deleteEntryForJournalMock).not.toHaveBeenCalled()
+  })
+
+  it('validates the payload before deleting an entry', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+
+    const result = await deleteEntryAction({
+      journalId: 'journal-1',
+      entryId: 'entry-1',
+    })
+
+    expect(result).toEqual({
+      error: 'Invalid journal id.',
+      success: false,
+    })
+    expect(deleteEntryForJournalMock).not.toHaveBeenCalled()
+  })
+
+  it('returns a permission error when the data helper rejects the deletion', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    deleteEntryForJournalMock.mockResolvedValue(false)
+
+    const result = await deleteEntryAction({
+      journalId: '4f687c5a-6576-4e05-a0f8-e4cdfdebe295',
+      entryId: '26a0908b-c293-43f5-94c0-9b5d53fcc592',
+    })
+
+    expect(deleteEntryForJournalMock).toHaveBeenCalledWith({
+      userId: 'user-1',
+      journalId: '4f687c5a-6576-4e05-a0f8-e4cdfdebe295',
+      entryId: '26a0908b-c293-43f5-94c0-9b5d53fcc592',
+    })
+    expect(result).toEqual({
+      error: 'Entry not found or you do not have permission to delete it.',
+      success: false,
+    })
+  })
+
+  it('revalidates the journal page when deletion succeeds', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    deleteEntryForJournalMock.mockResolvedValue(true)
+
+    const result = await deleteEntryAction({
+      journalId: '4f687c5a-6576-4e05-a0f8-e4cdfdebe295',
+      entryId: '26a0908b-c293-43f5-94c0-9b5d53fcc592',
+    })
+
+    expect(revalidatePathMock).toHaveBeenCalledWith(
+      '/dashboard/journals/4f687c5a-6576-4e05-a0f8-e4cdfdebe295',
+    )
+    expect(result).toEqual({
+      error: null,
+      success: true,
+    })
   })
 })
 
@@ -545,7 +711,176 @@ describe('createInviteAction', () => {
   })
 })
 
-describe('updateJournalTitleAction', () => {
+describe('addCommentAction', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // Enable comments feature by default
+    getLaunchDarklyVariationMock.mockResolvedValue(true)
+    canUserCommentOnEntryMock.mockResolvedValue(true)
+    moderateContentMock.mockResolvedValue({ decision: 'allow' })
+  })
+
+  it('returns an auth error when the user is signed out', async () => {
+    getCurrentAppUserMock.mockResolvedValue(null)
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'Looks good.',
+    })
+
+    expect(result).toEqual({
+      error: 'You must be signed in to reflect.',
+      success: false,
+    })
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+
+  it('validates input before calling the data helper', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+
+    const result = await addCommentAction({
+      journalId: 'journal-1',
+      entryId: VALID_ENTRY_ID,
+      content: 'Looks good.',
+    })
+
+    expect(result).toEqual({
+      error: 'Invalid journal id.',
+      success: false,
+    })
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+
+  it('returns a permission error when comment creation is rejected', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    createEntryCommentMock.mockResolvedValue(null)
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'Looks good.',
+    })
+
+    expect(createEntryCommentMock).toHaveBeenCalledWith({
+      entryId: VALID_ENTRY_ID,
+      authorUserId: 'user-1',
+      content: 'Looks good.',
+    })
+    expect(result).toEqual({
+      error: 'You do not have permission to reflect on this entry.',
+      success: false,
+    })
+  })
+
+  it('returns a permission error before moderation when the user cannot comment on the entry', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    canUserCommentOnEntryMock.mockResolvedValue(false)
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'Looks good.',
+    })
+
+    expect(result).toEqual({
+      error: 'You do not have permission to reflect on this entry.',
+      success: false,
+    })
+    expect(moderateContentMock).not.toHaveBeenCalled()
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+
+  it('returns a feature disabled error when comments feature is disabled', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    getLaunchDarklyVariationMock.mockResolvedValue(false)
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'Looks good.',
+    })
+
+    expect(result).toEqual({
+      error: 'Reflections are not available at this time.',
+      success: false,
+    })
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+
+  it('creates a comment and revalidates the journal page on success', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    createEntryCommentMock.mockResolvedValue({
+      id: 'comment-1',
+      entryId: VALID_ENTRY_ID,
+      authorUserId: 'user-1',
+      journalId: '08f7f9ef-a4ea-445f-a29f-b865208ce13a',
+      content: 'Great entry!',
+      createdAt: new Date('2026-03-14T10:00:00.000Z'),
+    })
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: '  Great entry!  ',
+    })
+
+    expect(createEntryCommentMock).toHaveBeenCalledWith({
+      entryId: VALID_ENTRY_ID,
+      authorUserId: 'user-1',
+      content: 'Great entry!',
+    })
+    expect(revalidatePathMock).toHaveBeenCalledWith(
+      '/dashboard/journals/08f7f9ef-a4ea-445f-a29f-b865208ce13a',
+    )
+    expect(result).toEqual({
+      error: null,
+      success: true,
+    })
+  })
+
+  it('blocks comment creation when moderation disallows content', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    moderateContentMock.mockResolvedValue({
+      decision: 'block',
+      reasonCode: 'policy_violation',
+    })
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'disallowed text',
+    })
+
+    expect(result).toEqual({
+      error: 'Your reflection could not be posted because it violates our content guidelines.',
+      success: false,
+    })
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+
+  it('returns retry error when comment moderation fails in fail-closed mode', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+    moderateContentMock.mockResolvedValue({
+      decision: 'block',
+      reasonCode: 'provider_error_fail_closed',
+    })
+
+    const result = await addCommentAction({
+      journalId: VALID_JOURNAL_ID,
+      entryId: VALID_ENTRY_ID,
+      content: 'normal text',
+    })
+
+    expect(result).toEqual({
+      error: 'We could not process your request right now. Please try again.',
+      success: false,
+    })
+    expect(createEntryCommentMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('updateJournalDetailsAction', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
@@ -553,38 +888,56 @@ describe('updateJournalTitleAction', () => {
   it('returns an auth error when the user is signed out', async () => {
     getCurrentAppUserMock.mockResolvedValue(null)
 
-    const result = await updateJournalTitleAction({
+    const result = await updateJournalDetailsAction({
       journalId: 'journal-1',
       title: 'New title',
+      description: 'New description',
     })
 
     expect(result).toEqual({
       error: 'You must be signed in to update this journal.',
     })
-    expect(updateJournalTitleForOwnerMock).not.toHaveBeenCalled()
+    expect(updateJournalDetailsForOwnerMock).not.toHaveBeenCalled()
   })
 
   it('validates the title before calling the data helper', async () => {
     getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
 
-    const result = await updateJournalTitleAction({
+    const result = await updateJournalDetailsAction({
       journalId: 'journal-1',
       title: '   ',
+      description: 'New description',
     })
 
     expect(result).toEqual({
       error: 'Title is required.',
     })
-    expect(updateJournalTitleForOwnerMock).not.toHaveBeenCalled()
+    expect(updateJournalDetailsForOwnerMock).not.toHaveBeenCalled()
+  })
+
+  it('validates description length before calling the data helper', async () => {
+    getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
+
+    const result = await updateJournalDetailsAction({
+      journalId: 'journal-1',
+      title: 'New title',
+      description: 'x'.repeat(2001),
+    })
+
+    expect(result).toEqual({
+      error: 'Description must be 2000 characters or less.',
+    })
+    expect(updateJournalDetailsForOwnerMock).not.toHaveBeenCalled()
   })
 
   it('returns a permission error when the data helper rejects the update', async () => {
     getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
-    updateJournalTitleForOwnerMock.mockResolvedValue(false)
+    updateJournalDetailsForOwnerMock.mockResolvedValue(false)
 
-    const result = await updateJournalTitleAction({
+    const result = await updateJournalDetailsAction({
       journalId: 'journal-1',
       title: 'New title',
+      description: 'New description',
     })
 
     expect(result).toEqual({
@@ -594,17 +947,19 @@ describe('updateJournalTitleAction', () => {
 
   it('trims inputs and revalidates the journal page on success', async () => {
     getCurrentAppUserMock.mockResolvedValue({ id: 'user-1' })
-    updateJournalTitleForOwnerMock.mockResolvedValue(true)
+    updateJournalDetailsForOwnerMock.mockResolvedValue(true)
 
-    const result = await updateJournalTitleAction({
+    const result = await updateJournalDetailsAction({
       journalId: '  journal-1  ',
       title: '  Fresh title  ',
+      description: '  Updated description  ',
     })
 
-    expect(updateJournalTitleForOwnerMock).toHaveBeenCalledWith({
+    expect(updateJournalDetailsForOwnerMock).toHaveBeenCalledWith({
       ownerUserId: 'user-1',
       journalId: 'journal-1',
       title: 'Fresh title',
+      description: 'Updated description',
     })
     expect(revalidatePathMock).toHaveBeenCalledWith('/dashboard/journals/journal-1')
     expect(result).toEqual({

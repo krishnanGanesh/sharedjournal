@@ -1,38 +1,46 @@
+import { getCommentsForEntries } from '@/data/comments'
+import { EntryComments } from './entry-comments'
 import { format, parseISO } from 'date-fns'
+import { ImagesIcon } from 'lucide-react'
 import Link from 'next/link'
 import { notFound, redirect } from 'next/navigation'
 
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+  createLaunchDarklyContext,
+  getLaunchDarklyVariation,
+} from '@/lib/launchdarkly/server-client'
+import { Button } from '@/components/ui/button'
+import { OwnedPendingInvitations } from '@/app/dashboard/journals/[journalId]/owned-pending-invitations'
 import {
+  addCommentAction,
+  cancelPendingInvitationAction,
   cleanupEntryImageUploadsAction,
   createEntryAction,
   createInviteAction,
-  updateJournalTitleAction,
+  deleteEntryAction,
+  updateJournalDetailsAction,
 } from '@/app/dashboard/journals/[journalId]/actions'
 import { CollaboratorsAccordion } from '@/app/dashboard/journals/collaborators-accordion'
 import { deleteJournalAction } from '@/app/dashboard/actions'
-import { DeleteJournalButton } from '@/app/dashboard/delete-journal-button'
 import { CreateEntryModal } from '@/app/dashboard/journals/[journalId]/create-entry-modal'
+import { DeleteEntryButton } from '@/app/dashboard/journals/[journalId]/delete-entry-button'
 import { InviteUserModal } from '@/app/dashboard/journals/[journalId]/invite-user-modal'
 import { JournalEntriesInfiniteLoader } from '@/app/dashboard/journals/[journalId]/journal-entries-infinite-loader'
+import { OwnerActionsMenu } from '@/app/dashboard/journals/[journalId]/owner-actions-menu'
 import { JournalTitleEditor } from '@/app/dashboard/journals/[journalId]/journal-title-editor'
 import {
+  getAllPhotosForJournal,
   getJournalEntryCountForJournal,
   getJournalEntriesForJournal,
   type JournalEntryForJournal,
 } from '@/data/entries'
 import { buildEntryPhotoProxyUrl } from '@/lib/entry-image-storage'
 import { EntryPhotoGallery } from '@/app/dashboard/journals/[journalId]/entry-photo-gallery'
-import {
-  getPendingInvitationsForOwnedJournal,
-} from '@/data/invitations'
+import { JournalSlideshow } from '@/app/dashboard/journals/[journalId]/journal-slideshow'
+import { getPendingInvitationsForOwnedJournal } from '@/data/invitations'
 import { getCollaboratorsForJournal, getUserJournalById } from '@/data/journals'
+import { PageFlairBackdrop } from '@/components/page-flair-shell'
 import { getCurrentAppUser } from '@/lib/get-current-app-user'
 
 type JournalDetailsPageProps = {
@@ -46,14 +54,24 @@ type JournalDetailsPageProps = {
 
 const ENTRIES_PER_PAGE = 10
 
-export default async function JournalDetailsPage({ params, searchParams }: JournalDetailsPageProps) {
+export default async function JournalDetailsPage({
+  params,
+  searchParams,
+}: JournalDetailsPageProps) {
+  const { journalId } = await params
+
+  // Ignore extension-like path probes (e.g. browser installHook.js.map requests)
+  // so they don't execute auth-dependent journal page logic.
+  if (journalId.includes('.')) {
+    notFound()
+  }
+
   const appUser = await getCurrentAppUser()
 
   if (!appUser) {
     redirect('/sign-in')
   }
 
-  const { journalId } = await params
   const journal = await getUserJournalById(appUser.id, journalId)
 
   if (!journal) {
@@ -61,19 +79,37 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
   }
 
   const journalTitle = journal.title
-  const canEditJournalTitle = journal.ownerUserId === appUser.id
   const resolvedSearchParams = searchParams ? await searchParams : undefined
   const parsedEntriesPage = Number.parseInt(resolvedSearchParams?.entriesPage ?? '1', 10)
-  const currentEntriesPage = Number.isNaN(parsedEntriesPage) || parsedEntriesPage < 1
-    ? 1
-    : parsedEntriesPage
+  const currentEntriesPage =
+    Number.isNaN(parsedEntriesPage) || parsedEntriesPage < 1 ? 1 : parsedEntriesPage
 
-  const [totalEntryCount, entries] = await Promise.all([
+  // Check if comments feature is enabled via LaunchDarkly
+  const ldContext = createLaunchDarklyContext({
+    key: appUser.id,
+  })
+  const isCommentsFeatureEnabled = await getLaunchDarklyVariation({
+    flagKey: 'entry-comments',
+    context: ldContext,
+    fallback: false,
+  })
+
+  const [totalEntryCount, entries, allPhotos] = await Promise.all([
     getJournalEntryCountForJournal(appUser.id, journalId),
     getJournalEntriesForJournal(appUser.id, journalId, {
       limit: currentEntriesPage * ENTRIES_PER_PAGE,
     }),
+    getAllPhotosForJournal(appUser.id, journalId),
   ])
+
+  // Fetch comments for all entries only if feature is enabled
+  const entryCommentsMap = isCommentsFeatureEnabled
+    ? await getCommentsForEntries(entries.map((entry) => entry.id))
+    : {}
+
+  // Determine if user can comment (editor or owner, and feature enabled)
+  const canComment =
+    isCommentsFeatureEnabled && (journal.role === 'editor' || journal.role === 'owner')
   const collaborators = await getCollaboratorsForJournal(appUser.id, journalId)
   const pendingInvitations = journal.isOwner
     ? await getPendingInvitationsForOwnedJournal({
@@ -84,22 +120,26 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
   const hasMoreEntries = entries.length < totalEntryCount
 
   return (
-    <main className="mx-auto w-full max-w-5xl space-y-6 px-6 py-8">
+    <main className="relative mx-auto w-full max-w-5xl space-y-6 px-6 py-8">
+      <PageFlairBackdrop
+        className="fixed inset-0 -z-10 overflow-hidden"
+        topOrbClassName="-top-32 right-0 h-96 w-96 bg-[#86e6d3]/24"
+        bottomOrbClassName="bottom-0 -left-32 h-96 w-96 bg-[#ffab92]/18"
+      />
       <section className="space-y-2">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-2">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 flex-1 space-y-2">
             <Link
               href="/dashboard"
               className="text-muted-foreground mb-2 inline-block text-sm underline-offset-4 hover:underline"
             >
               Back to journals
             </Link>
-            <JournalTitleEditor
-              journalId={journalId}
-              title={journal.title}
-              canEdit={canEditJournalTitle}
-              action={updateJournalTitleAction}
-            />
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <JournalTitleEditor title={journal.title} />
+              </div>
+            </div>
             {journal.description ? (
               <p className="text-muted-foreground text-sm">{journal.description}</p>
             ) : null}
@@ -107,12 +147,16 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
               <CollaboratorsAccordion collaborators={collaborators} />
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {journal.isOwner ? (
-              <DeleteJournalButton
-                journalId={journalId}
-                action={deleteJournalAction}
-                successRedirectTo="/dashboard"
+          <div className="flex w-full items-center justify-end gap-2 sm:w-auto sm:justify-end">
+            {allPhotos.length > 0 ? (
+              <JournalSlideshow
+                photos={allPhotos}
+                trigger={
+                  <Button type="button" variant="outline" size="sm">
+                    <ImagesIcon className="size-4" aria-hidden />
+                    <span className="sr-only sm:not-sr-only">Slideshow</span>
+                  </Button>
+                }
               />
             ) : null}
             <CreateEntryModal
@@ -127,6 +171,15 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
                 action={createInviteAction}
               />
             ) : null}
+            {journal.isOwner ? (
+              <OwnerActionsMenu
+                journalId={journalId}
+                journalTitle={journal.title}
+                journalDescription={journal.description}
+                deleteAction={deleteJournalAction}
+                updateAction={updateJournalDetailsAction}
+              />
+            ) : null}
           </div>
         </div>
       </section>
@@ -134,18 +187,11 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
       {pendingInvitations.length > 0 ? (
         <section className="space-y-3">
           <h2 className="text-xl font-semibold tracking-tight">Pending invites</h2>
-          <div className="grid gap-3">
-            {pendingInvitations.map((invitation) => (
-              <Card key={invitation.id}>
-                <CardHeader>
-                  <CardTitle className="text-base">{invitation.inviteeEmail}</CardTitle>
-                  <CardDescription>
-                    {invitation.role} · {invitation.emailDelivered ? 'email delivered' : 'manual share needed'}
-                  </CardDescription>
-                </CardHeader>
-              </Card>
-            ))}
-          </div>
+          <OwnedPendingInvitations
+            invitations={pendingInvitations}
+            journalId={journalId}
+            cancelAction={cancelPendingInvitationAction}
+          />
         </section>
       ) : null}
 
@@ -164,10 +210,22 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
               {entries.map((entry: JournalEntryForJournal) => (
                 <Card key={entry.id}>
                   <CardHeader>
-                    <CardTitle>{entry.title || 'Untitled entry'}</CardTitle>
-                    <CardDescription>
-                      {format(parseISO(entry.entryDate), 'MMMM d, yyyy')} · {entry.authorName || 'Unknown author'}
-                    </CardDescription>
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 space-y-1">
+                        <CardTitle>{entry.title || 'Untitled entry'}</CardTitle>
+                        <CardDescription>
+                          {format(parseISO(entry.entryDate), 'MMMM d, yyyy')} ·{' '}
+                          {entry.authorName || 'Unknown author'}
+                        </CardDescription>
+                      </div>
+                      {journal.isOwner || entry.authorUserId === appUser.id ? (
+                        <DeleteEntryButton
+                          journalId={journalId}
+                          entryId={entry.id}
+                          action={deleteEntryAction}
+                        />
+                      ) : null}
+                    </div>
                   </CardHeader>
                   <CardContent>
                     <p className="text-sm leading-6 whitespace-pre-wrap">{entry.content}</p>
@@ -177,6 +235,15 @@ export default async function JournalDetailsPage({ params, searchParams }: Journ
                           id: photo.id,
                           src: buildEntryPhotoProxyUrl(entry.id, photo.id),
                         }))}
+                      />
+                    ) : null}
+                    {isCommentsFeatureEnabled ? (
+                      <EntryComments
+                        entryId={entry.id}
+                        journalId={journalId}
+                        action={addCommentAction}
+                        comments={entryCommentsMap[entry.id] || []}
+                        canComment={canComment}
                       />
                     ) : null}
                   </CardContent>

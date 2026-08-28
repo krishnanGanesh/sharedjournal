@@ -1,30 +1,37 @@
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 
-import {
-  Card,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   acceptDashboardInvitationAction,
   createJournalAction,
+  dismissFeatureRequestSurveyAction,
   declineDashboardInvitationAction,
   deleteJournalAction,
+  generateOwnerExportAction,
+  submitFeatureRequestSurveyAction,
 } from '@/app/dashboard/actions'
 import { CreateJournalModal } from '@/app/dashboard/create-journal-modal'
+import { ExportJournalsButton } from '@/app/dashboard/export-journals-button'
+import { FeatureRequestModal } from '@/app/dashboard/feature-request-modal'
 import { JournalCard } from '@/app/dashboard/journal-card'
 import { PendingInvitationRow } from '@/app/dashboard/pending-invitation-row'
 import { Button } from '@/components/ui/button'
+import { PageFlairBackdrop } from '@/components/page-flair-shell'
 import { getPendingInvitationsForEmail } from '@/data/invitations'
+import { getFeatureRequestSurveyResponseForUser } from '@/data/feature-requests'
 import {
   getCollaboratorsForJournals,
+  getRecentPhotosForJournals,
   getUserJournalCount,
   getUserJournals,
 } from '@/data/journals'
 import { getCurrentAppUser } from '@/lib/get-current-app-user'
 import { getCurrentUserEmail } from '@/lib/get-current-user-email'
+import {
+  createLaunchDarklyContext,
+  getLaunchDarklyVariation,
+} from '@/lib/launchdarkly/server-client'
 
 const JOURNALS_PER_PAGE = 5
 
@@ -55,19 +62,51 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
     offset,
   })
   const currentUserEmail = await getCurrentUserEmail()
+  const ldContext = createLaunchDarklyContext({
+    key: appUser.id,
+    email: currentUserEmail,
+  })
+  const isOwnerJournalExportEnabled = await getLaunchDarklyVariation({
+    flagKey: 'owner-journal-export',
+    context: ldContext,
+    fallback: false,
+  })
   const pendingInvitations = currentUserEmail
     ? await getPendingInvitationsForEmail(currentUserEmail)
     : []
+  const featureRequestSurveyResponse = await getFeatureRequestSurveyResponseForUser({
+    userId: appUser.id,
+  })
+  const shouldShowFeatureRequestPrompt = featureRequestSurveyResponse === null
   const collaboratorsByJournal = await getCollaboratorsForJournals(
+    userJournals.map((journal) => journal.id),
+  )
+  const recentPhotosByJournal = await getRecentPhotosForJournals(
     userJournals.map((journal) => journal.id),
   )
 
   return (
-    <main className="mx-auto w-full max-w-5xl space-y-6 px-6 py-8">
+    <main className="relative mx-auto w-full max-w-5xl space-y-6 px-6 py-8">
+      <PageFlairBackdrop
+        className="fixed inset-0 -z-10 overflow-hidden"
+        topOrbClassName="-top-32 right-0 h-96 w-96 bg-[#86e6d3]/24"
+        bottomOrbClassName="bottom-0 -left-32 h-96 w-96 bg-[#ffab92]/18"
+      />
       <section className="space-y-4">
         <div className="flex items-start justify-between gap-4">
           <h1 className="text-3xl font-semibold tracking-tight">Your Journals</h1>
-          <CreateJournalModal action={createJournalAction} />
+          <div className="flex items-center gap-2">
+            {shouldShowFeatureRequestPrompt ? (
+              <FeatureRequestModal
+                submitAction={submitFeatureRequestSurveyAction}
+                dismissAction={dismissFeatureRequestSurveyAction}
+              />
+            ) : null}
+            {isOwnerJournalExportEnabled ? (
+              <ExportJournalsButton action={generateOwnerExportAction} />
+            ) : null}
+            <CreateJournalModal action={createJournalAction} />
+          </div>
         </div>
       </section>
 
@@ -103,6 +142,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
             journal={journal}
             collaborators={collaboratorsByJournal.get(journal.id) ?? []}
             deleteAction={deleteJournalAction}
+            recentPhotos={recentPhotosByJournal.get(journal.id) ?? []}
           />
         ))
       )}

@@ -2,9 +2,13 @@
 
 import { z } from 'zod'
 
+import { buildOwnerJournalsExportPayload } from '@/data/exports'
+import { upsertFeatureRequestSurveyResponse } from '@/data/feature-requests'
 import { createJournalForOwner, deleteJournalOwnedByUser } from '@/data/journals'
+import { createExportDownloadToken } from '@/lib/export-link-token'
 import { getCurrentAppUser } from '@/lib/get-current-app-user'
 import { getCurrentUserEmail } from '@/lib/get-current-user-email'
+import { createOwnerJournalsExportZipAndUpload } from '@/lib/journal-export'
 import { JOURNAL_TITLE_MAX_LENGTH } from '@/lib/journal-constants'
 
 export type CreateJournalInput = {
@@ -40,6 +44,30 @@ export type DashboardDeclineInvitationState = {
   success: boolean
 }
 
+export type GenerateOwnerExportInput = Record<string, never>
+
+export type GenerateOwnerExportState = {
+  error: string | null
+  downloadUrl: string | null
+  expiresAt: string | null
+}
+
+export type SubmitFeatureRequestSurveyInput = {
+  requestText: string
+}
+
+export type SubmitFeatureRequestSurveyState = {
+  error: string | null
+  success: boolean
+}
+
+export type DismissFeatureRequestSurveyInput = Record<string, never>
+
+export type DismissFeatureRequestSurveyState = {
+  error: string | null
+  success: boolean
+}
+
 const createJournalSchema = z.object({
   title: z
     .string()
@@ -57,9 +85,18 @@ const dashboardInvitationActionSchema = z.object({
   token: z.string().trim().min(1, 'Invitation token is required.'),
 })
 
-export async function createJournalAction(
-  input: CreateJournalInput,
-): Promise<CreateJournalState> {
+const generateOwnerExportSchema = z.object({}).strict()
+
+const submitFeatureRequestSurveySchema = z.object({
+  requestText: z
+    .string()
+    .trim()
+    .max(2000, 'Feature request must be 2000 characters or less.'),
+})
+
+const dismissFeatureRequestSurveySchema = z.object({}).strict()
+
+export async function createJournalAction(input: CreateJournalInput): Promise<CreateJournalState> {
   const currentUser = await getCurrentAppUser()
 
   if (!currentUser) {
@@ -90,9 +127,7 @@ export async function createJournalAction(
   }
 }
 
-export async function deleteJournalAction(
-  input: DeleteJournalInput,
-): Promise<DeleteJournalState> {
+export async function deleteJournalAction(input: DeleteJournalInput): Promise<DeleteJournalState> {
   const currentUser = await getCurrentAppUser()
 
   if (!currentUser) {
@@ -206,6 +241,142 @@ export async function declineDashboardInvitationAction(
       success: false,
     }
   }
+
+  return {
+    error: null,
+    success: true,
+  }
+}
+
+export async function generateOwnerExportAction(
+  input: GenerateOwnerExportInput,
+): Promise<GenerateOwnerExportState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to export journals.',
+      downloadUrl: null,
+      expiresAt: null,
+    }
+  }
+
+  const parsedInput = generateOwnerExportSchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to generate export.',
+      downloadUrl: null,
+      expiresAt: null,
+    }
+  }
+
+  try {
+    const ownerEmail = await getCurrentUserEmail()
+    const payload = await buildOwnerJournalsExportPayload({
+      ownerUserId: currentUser.id,
+      ownerEmail,
+    })
+
+    if (payload.journals.length === 0) {
+      return {
+        error: 'You do not have any owner journals to export.',
+        downloadUrl: null,
+        expiresAt: null,
+      }
+    }
+
+    const uploadedExport = await createOwnerJournalsExportZipAndUpload({
+      ownerUserId: currentUser.id,
+      payload,
+    })
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+    const token = createExportDownloadToken({
+      userId: currentUser.id,
+      storageKey: uploadedExport.storageKey,
+      fileName: uploadedExport.fileName,
+      exp: Math.floor(expiresAt.getTime() / 1000),
+    })
+
+    return {
+      error: null,
+      downloadUrl: `/api/exports/download?token=${encodeURIComponent(token)}`,
+      expiresAt: expiresAt.toISOString(),
+    }
+  } catch (error) {
+    console.error('Failed to generate owner export', {
+      userId: currentUser.id,
+      error,
+    })
+
+    return {
+      error: 'Unable to generate export right now. Please try again.',
+      downloadUrl: null,
+      expiresAt: null,
+    }
+  }
+}
+
+export async function submitFeatureRequestSurveyAction(
+  input: SubmitFeatureRequestSurveyInput,
+): Promise<SubmitFeatureRequestSurveyState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to submit feature feedback.',
+      success: false,
+    }
+  }
+
+  const parsedInput = submitFeatureRequestSurveySchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to submit feature feedback.',
+      success: false,
+    }
+  }
+
+  await upsertFeatureRequestSurveyResponse({
+    userId: currentUser.id,
+    requestText: parsedInput.data.requestText || null,
+    status: 'submitted',
+  })
+
+  return {
+    error: null,
+    success: true,
+  }
+}
+
+export async function dismissFeatureRequestSurveyAction(
+  input: DismissFeatureRequestSurveyInput,
+): Promise<DismissFeatureRequestSurveyState> {
+  const currentUser = await getCurrentAppUser()
+
+  if (!currentUser) {
+    return {
+      error: 'You must be signed in to dismiss feature feedback.',
+      success: false,
+    }
+  }
+
+  const parsedInput = dismissFeatureRequestSurveySchema.safeParse(input)
+
+  if (!parsedInput.success) {
+    return {
+      error: parsedInput.error.issues[0]?.message ?? 'Unable to dismiss feature feedback.',
+      success: false,
+    }
+  }
+
+  await upsertFeatureRequestSurveyResponse({
+    userId: currentUser.id,
+    requestText: null,
+    status: 'dismissed',
+  })
 
   return {
     error: null,

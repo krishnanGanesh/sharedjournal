@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
+import { axe } from 'vitest-axe'
 
 import { CollaboratorsAccordion } from '@/app/dashboard/journals/collaborators-accordion'
 
@@ -27,5 +28,65 @@ describe('CollaboratorsAccordion', () => {
     expect(screen.getByText('Person 5')).toBeInTheDocument()
     expect(screen.queryByText('Person 6')).not.toBeInTheDocument()
     expect(screen.getByText('+1 more')).toBeInTheDocument()
+  })
+
+  it('renders all collaborators when maxVisible is not provided', async () => {
+    const user = userEvent.setup()
+    const collaborators = [
+      { id: 'c1', displayName: 'Person 1', role: 'editor' as const },
+      { id: 'c2', displayName: 'Person 2', role: 'viewer' as const },
+    ]
+
+    render(<CollaboratorsAccordion collaborators={collaborators} />)
+
+    await user.click(screen.getByRole('button', { name: 'Collaborators (2)' }))
+
+    expect(screen.getByText('Person 1')).toBeInTheDocument()
+    expect(screen.getByText('Person 2')).toBeInTheDocument()
+    expect(screen.queryByText(/\+\d+ more/)).not.toBeInTheDocument()
+  })
+
+  it('renders empty state and unnamed fallback text', async () => {
+    const user = userEvent.setup()
+
+    const { unmount } = render(<CollaboratorsAccordion collaborators={[]} />)
+
+    await user.click(screen.getByRole('button', { name: 'Collaborators (0)' }))
+    expect(screen.getByText('Not shared with anyone yet.')).toBeInTheDocument()
+
+    unmount()
+
+    render(
+      <CollaboratorsAccordion
+        collaborators={[{ id: 'c1', displayName: null, role: 'viewer' as const }]}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Collaborators (1)' }))
+    expect(screen.getByText('Unnamed user')).toBeInTheDocument()
+  })
+
+  describe('accessibility', () => {
+    it('has no violations when collapsed', async () => {
+      const { container } = render(
+        <CollaboratorsAccordion
+          collaborators={[{ id: 'c1', displayName: 'Alex', role: 'editor' as const }]}
+        />,
+      )
+      expect(await axe(container)).toHaveNoViolations()
+    })
+
+    it('has no violations when expanded', async () => {
+      const user = userEvent.setup()
+      const { container } = render(
+        <CollaboratorsAccordion
+          collaborators={[{ id: 'c1', displayName: 'Alex', role: 'editor' as const }]}
+        />,
+      )
+
+      await user.click(screen.getByRole('button', { name: 'Collaborators (1)' }))
+
+      expect(await axe(container)).toHaveNoViolations()
+    })
   })
 })

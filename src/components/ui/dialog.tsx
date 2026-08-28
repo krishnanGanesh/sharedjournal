@@ -21,7 +21,10 @@ function DialogClose({ ...props }: React.ComponentProps<typeof DialogPrimitive.C
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
 }
 
-function DialogOverlay({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+function DialogOverlay({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
   return (
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
@@ -31,7 +34,11 @@ function DialogOverlay({ className, ...props }: React.ComponentProps<typeof Dial
   )
 }
 
-function DialogContent({ className, children, ...props }: React.ComponentProps<typeof DialogPrimitive.Content>) {
+type DialogContentProps = React.ComponentProps<typeof DialogPrimitive.Content> & {
+  withFlair?: boolean
+}
+
+function DialogContent({ className, children, withFlair = true, ...props }: DialogContentProps) {
   return (
     <DialogPortal>
       <DialogOverlay />
@@ -39,10 +46,17 @@ function DialogContent({ className, children, ...props }: React.ComponentProps<t
         data-slot="dialog-content"
         className={cn(
           'bg-background fixed top-[50%] left-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg',
+          'isolate overflow-hidden [&>*]:relative [&>*]:z-10',
           className,
         )}
         {...props}
       >
+        {withFlair ? (
+          <div className="pointer-events-none absolute inset-0" aria-hidden="true">
+            <div className="absolute -top-10 right-0 h-32 w-32 rounded-full bg-[#86e6d3]/18 blur-2xl" />
+            <div className="absolute bottom-0 -left-8 h-28 w-28 rounded-full bg-[#ffab92]/14 blur-2xl" />
+          </div>
+        ) : null}
         {children}
       </DialogPrimitive.Content>
     </DialogPortal>
@@ -50,20 +64,35 @@ function DialogContent({ className, children, ...props }: React.ComponentProps<t
 }
 
 function DialogHeader({ className, ...props }: React.ComponentProps<'div'>) {
-  return <div data-slot="dialog-header" className={cn('flex flex-col gap-1.5', className)} {...props} />
+  return (
+    <div data-slot="dialog-header" className={cn('flex flex-col gap-1.5', className)} {...props} />
+  )
 }
 
 function DialogFooter({ className, ...props }: React.ComponentProps<'div'>) {
   return (
-    <div data-slot="dialog-footer" className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)} {...props} />
+    <div
+      data-slot="dialog-footer"
+      className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)}
+      {...props}
+    />
   )
 }
 
 function DialogTitle({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Title>) {
-  return <DialogPrimitive.Title data-slot="dialog-title" className={cn('text-lg font-semibold', className)} {...props} />
+  return (
+    <DialogPrimitive.Title
+      data-slot="dialog-title"
+      className={cn('text-lg font-semibold', className)}
+      {...props}
+    />
+  )
 }
 
-function DialogDescription({ className, ...props }: React.ComponentProps<typeof DialogPrimitive.Description>) {
+function DialogDescription({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Description>) {
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"

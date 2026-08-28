@@ -1,7 +1,7 @@
-import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import { db } from '@/db'
-import { journalMembers, journals, users } from '@/db/schema'
+import { entries, entryPhotos, journalMembers, journals, users } from '@/db/schema'
 
 export type UserJournal = {
   id: string
@@ -79,6 +79,7 @@ export type UserJournalDetails = {
   title: string
   description: string | null
   ownerUserId: string
+  role: 'owner' | 'editor' | 'viewer'
   isOwner: boolean
 }
 
@@ -105,6 +106,7 @@ export async function getUserJournalById(
       title: journals.title,
       description: journals.description,
       ownerUserId: journals.ownerUserId,
+      role: journalMembers.role,
       isOwner: sql<boolean>`${journals.ownerUserId} = ${userId}`,
     })
     .from(journals)
@@ -163,12 +165,7 @@ export async function getCollaboratorsForJournals(
     })
     .from(journalMembers)
     .innerJoin(users, eq(users.id, journalMembers.userId))
-    .where(
-      and(
-        inArray(journalMembers.journalId, journalIds),
-        ne(journalMembers.role, 'owner'),
-      ),
-    )
+    .where(and(inArray(journalMembers.journalId, journalIds), ne(journalMembers.role, 'owner')))
 
   const collaboratorsByJournal = new Map<string, JournalCollaborator[]>()
 
@@ -195,6 +192,13 @@ type UpdateJournalTitleInput = {
   ownerUserId: string
   journalId: string
   title: string
+}
+
+type UpdateJournalDetailsInput = {
+  ownerUserId: string
+  journalId: string
+  title: string
+  description: string | null
 }
 
 export async function createJournalForOwner({
@@ -239,4 +243,64 @@ export async function updateJournalTitleForOwner({
     .returning({ id: journals.id })
 
   return Boolean(updatedJournal)
+}
+
+export async function updateJournalDetailsForOwner({
+  ownerUserId,
+  journalId,
+  title,
+  description,
+}: UpdateJournalDetailsInput): Promise<boolean> {
+  const [updatedJournal] = await db
+    .update(journals)
+    .set({ title, description })
+    .where(and(eq(journals.id, journalId), eq(journals.ownerUserId, ownerUserId)))
+    .returning({ id: journals.id })
+
+  return Boolean(updatedJournal)
+}
+
+export type JournalRecentPhoto = {
+  id: string
+  entryId: string
+  width: number | null
+  height: number | null
+}
+
+/**
+ * Get the most recent photos for multiple journals in one query.
+ * journalIds must already be access-scoped by the caller.
+ */
+export async function getRecentPhotosForJournals(
+  journalIds: string[],
+  limitPerJournal = 3,
+): Promise<Map<string, JournalRecentPhoto[]>> {
+  if (journalIds.length === 0) {
+    return new Map()
+  }
+
+  const photoRows = await db
+    .select({
+      journalId: entries.journalId,
+      id: entryPhotos.id,
+      entryId: entries.id,
+      width: entryPhotos.width,
+      height: entryPhotos.height,
+    })
+    .from(entryPhotos)
+    .innerJoin(entries, eq(entries.id, entryPhotos.entryId))
+    .where(inArray(entries.journalId, journalIds))
+    .orderBy(desc(entries.entryDate), desc(entries.createdAt), asc(entryPhotos.position))
+
+  const map = new Map<string, JournalRecentPhoto[]>()
+
+  for (const row of photoRows) {
+    const current = map.get(row.journalId) ?? []
+    if (current.length < limitPerJournal) {
+      current.push({ id: row.id, entryId: row.entryId, width: row.width, height: row.height })
+      map.set(row.journalId, current)
+    }
+  }
+
+  return map
 }

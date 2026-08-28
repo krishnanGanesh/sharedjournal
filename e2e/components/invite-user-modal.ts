@@ -16,16 +16,14 @@ export class InviteUserModal {
   }
 
   invitationSentText(emailPrefix: string) {
-    return this.page.getByText(
-      new RegExp(`Invitation (sent to|created for) ${emailPrefix}`, 'i'),
-    )
+    return this.page.getByText(new RegExp(`Invitation (sent to|created for) ${emailPrefix}`, 'i'))
   }
 
   inviteLinkText() {
     return this.page.getByText('Invite link:', { exact: false })
   }
 
-  async cancel() {
-    await this.page.getByRole('button', { name: 'Cancel' }).click()
+  async close() {
+    await this.page.getByRole('button', { name: 'Close' }).click()
   }
 }

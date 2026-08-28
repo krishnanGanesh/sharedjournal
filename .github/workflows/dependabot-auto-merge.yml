@@ -1,0 +1,109 @@
+name: Dependabot Auto Merge
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-auto-merge-main
+  cancel-in-progress: false
+
+jobs:
+  auto-approve-and-enable-merge:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Auto-approve Dependabot PR
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr review "$PR_URL" --approve --body "Auto-approving Dependabot dependency update."
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_AUTO_MERGE_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+
+      - name: Enable auto-merge (squash)
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge "$PR_URL" --auto --squash
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_AUTO_MERGE_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+
+  update-dependabot-branches:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Update next behind Dependabot PR branch
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDABOT_AUTO_MERGE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          pr_candidates=$(gh pr list \
+            --repo "$REPO" \
+            --base main \
+            --state open \
+            --json number,author,isDraft,mergeStateStatus,updatedAt \
+            --limit 100 \
+            --jq 'map(select((.author.login == "dependabot[bot]" or .author.login == "app/dependabot") and (.isDraft == false))) | sort_by(.updatedAt) | .[] | [.number, (.mergeStateStatus // "UNKNOWN"), .updatedAt] | @tsv')
+
+          if [[ -z "$pr_candidates" ]]; then
+            echo "No open Dependabot PRs found."
+            exit 0
+          fi
+
+          updated=0
+          cooldown_seconds=120
+          now_epoch=$(date -u +%s)
+
+          while IFS=$'\t' read -r pr_number merge_state updated_at; do
+            [[ -z "$pr_number" ]] && continue
+
+            pr_updated_epoch=$(date -u -d "$updated_at" +%s 2>/dev/null || echo 0)
+            age_seconds=$((now_epoch - pr_updated_epoch))
+
+            if [[ "$pr_updated_epoch" -gt 0 && "$age_seconds" -lt "$cooldown_seconds" ]]; then
+              echo "Skipping #${pr_number} (updated ${age_seconds}s ago; waiting at least ${cooldown_seconds}s)."
+              continue
+            fi
+
+            echo "Trying Dependabot PR #${pr_number} (mergeStateStatus=${merge_state})"
+
+            if gh pr update-branch "$pr_number" --repo "$REPO"; then
+              echo "Updated Dependabot PR #${pr_number}."
+              updated=1
+              break
+            fi
+
+            echo "Skipping #${pr_number} (not behind, conflicted, or cannot update automatically)."
+          done <<< "$pr_candidates"
+
+          if [[ "$updated" -eq 0 ]]; then
+            echo "No Dependabot PR branch could be updated."
+          fi

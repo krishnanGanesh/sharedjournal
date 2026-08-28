@@ -16,7 +16,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
@@ -32,6 +32,7 @@ jobs:
         run: npm run test -- --coverage
 
   e2e:
+    if: ${{ github.actor != 'dependabot[bot]' }}
     runs-on: ubuntu-latest
     env:
       NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
@@ -40,6 +41,8 @@ jobs:
       E2E_CLERK_EMAIL: ${{ vars.E2E_CLERK_EMAIL }}
       E2E_CLERK_PASSWORD: ${{ secrets.E2E_CLERK_PASSWORD }}
       ENTRY_CONTENT_ENCRYPTION_KEY: ${{ secrets.ENTRY_CONTENT_ENCRYPTION_KEY }}
+      LAUNCHDARKLY_SDK_KEY: ${{ secrets.LAUNCHDARKLY_SDK_KEY }}
+      BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
 
     steps:
       - name: Checkout

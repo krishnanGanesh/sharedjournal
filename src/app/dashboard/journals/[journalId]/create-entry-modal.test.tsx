@@ -2,19 +2,15 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const {
-  pushMock,
-  refreshMock,
-  uploadMock,
-  createObjectUrlMock,
-  revokeObjectUrlMock,
-} = vi.hoisted(() => ({
-  pushMock: vi.fn(),
-  refreshMock: vi.fn(),
-  uploadMock: vi.fn(),
-  createObjectUrlMock: vi.fn(),
-  revokeObjectUrlMock: vi.fn(),
-}))
+const { pushMock, refreshMock, uploadMock, createObjectUrlMock, revokeObjectUrlMock } = vi.hoisted(
+  () => ({
+    pushMock: vi.fn(),
+    refreshMock: vi.fn(),
+    uploadMock: vi.fn(),
+    createObjectUrlMock: vi.fn(),
+    revokeObjectUrlMock: vi.fn(),
+  }),
+)
 
 vi.mock('@vercel/blob/client', () => ({
   upload: uploadMock,
@@ -30,6 +26,53 @@ vi.mock('next/navigation', () => ({
 
 import { CreateEntryModal } from '@/app/dashboard/journals/[journalId]/create-entry-modal'
 import { ENTRY_IMAGE_MAX_FILE_BYTES, ENTRY_IMAGE_MAX_FILES } from '@/lib/entry-image-constants'
+
+type MockRecognitionResult = {
+  0: { transcript: string }
+  isFinal: boolean
+}
+
+class MockSpeechRecognition {
+  static instances: MockSpeechRecognition[] = []
+
+  lang = 'en-US'
+  interimResults = false
+  continuous = false
+  onstart: ((event: Event) => void) | null = null
+  onend: ((event: Event) => void) | null = null
+  onresult:
+    | ((
+        event: Event & { resultIndex?: number; results?: ArrayLike<MockRecognitionResult> },
+      ) => void)
+    | null = null
+  onerror: ((event: Event & { error?: string }) => void) | null = null
+
+  constructor() {
+    MockSpeechRecognition.instances.push(this)
+  }
+
+  start() {
+    this.onstart?.(new Event('start'))
+  }
+
+  stop() {
+    this.onend?.(new Event('end'))
+  }
+
+  emitFinalTranscript(transcript: string) {
+    const resultEvent = Object.assign(new Event('result'), {
+      resultIndex: 0,
+      results: [
+        {
+          0: { transcript },
+          isFinal: true,
+        },
+      ] satisfies ArrayLike<MockRecognitionResult>,
+    }) as Event & { resultIndex?: number; results?: ArrayLike<MockRecognitionResult> }
+
+    this.onresult?.(resultEvent)
+  }
+}
 
 class MockImage {
   onload: null | (() => void) = null
@@ -48,8 +91,54 @@ const originalCreateObjectURL = URL.createObjectURL
 const originalRevokeObjectURL = URL.revokeObjectURL
 
 describe('CreateEntryModal', () => {
+  function mockMatchMedia(matches: boolean) {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === '(pointer: coarse)' ? matches : false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+  }
+
+  function getCameraInput(): HTMLInputElement {
+    const input = document.querySelector('input[type="file"][capture]')
+
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error('Camera input not found')
+    }
+
+    return input
+  }
+
+  function mockSpeechRecognition(supported: boolean) {
+    MockSpeechRecognition.instances = []
+
+    Object.defineProperty(window, 'SpeechRecognition', {
+      configurable: true,
+      writable: true,
+      value: supported ? MockSpeechRecognition : undefined,
+    })
+
+    Object.defineProperty(window, 'webkitSpeechRecognition', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    })
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
+
+    mockMatchMedia(false)
+    mockSpeechRecognition(false)
 
     createObjectUrlMock
       .mockReturnValueOnce('blob:preview-1')
@@ -84,7 +173,7 @@ describe('CreateEntryModal', () => {
   })
 
   function getFileInput(): HTMLInputElement {
-    const input = document.querySelector('input[type="file"]')
+    const input = document.querySelector('input[type="file"]:not([capture])')
 
     if (!(input instanceof HTMLInputElement)) {
       throw new Error('File input not found')
@@ -233,7 +322,9 @@ describe('CreateEntryModal', () => {
 
     await user.click(screen.getByRole('button', { name: 'Create entry' }))
 
-    expect(screen.getByText('Remove failed uploads before creating this entry.')).toBeInTheDocument()
+    expect(
+      screen.getByText('Remove failed uploads before creating this entry.'),
+    ).toBeInTheDocument()
     expect(action).not.toHaveBeenCalled()
   }, 15000)
 
@@ -293,13 +384,18 @@ describe('CreateEntryModal', () => {
 
     await user.click(screen.getByRole('button', { name: 'Add entry' }))
 
-    const files = Array.from({ length: ENTRY_IMAGE_MAX_FILES + 1 }, (_, index) =>
-      new File([`f${index}`], `img-${index}.jpg`, { type: 'image/jpeg' }),
+    const files = Array.from(
+      { length: ENTRY_IMAGE_MAX_FILES + 1 },
+      (_, index) => new File([`f${index}`], `img-${index}.jpg`, { type: 'image/jpeg' }),
     )
 
     await user.upload(getFileInput(), files)
 
-    expect(screen.getByText(new RegExp(`Only ${ENTRY_IMAGE_MAX_FILES} images can be attached to an entry\\.`))).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        new RegExp(`Only ${ENTRY_IMAGE_MAX_FILES} images can be attached to an entry\\.`),
+      ),
+    ).toBeInTheDocument()
   }, 20000)
 
   it('shows cleanup error and keeps modal open when cancel cleanup fails', async () => {
@@ -323,4 +419,242 @@ describe('CreateEntryModal', () => {
     expect(await screen.findByText('Failed to discard draft image.')).toBeInTheDocument()
     expect(screen.getByText('Create an entry')).toBeInTheDocument()
   }, 15000)
+
+  it('does not show Take photo button on non-mobile devices', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(false)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(screen.getByRole('button', { name: 'Browse images' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take photo' })).not.toBeInTheDocument()
+  })
+
+  it('detects mobile using the pointer coarse media query', async () => {
+    const user = userEvent.setup()
+
+    const matchMediaMock = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(pointer: coarse)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: matchMediaMock,
+    })
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(matchMediaMock).toHaveBeenCalledWith('(pointer: coarse)')
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument()
+  })
+
+  it('defaults to non-mobile behavior when matchMedia is unavailable', async () => {
+    const user = userEvent.setup()
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    })
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(screen.getByRole('button', { name: 'Browse images' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take photo' })).not.toBeInTheDocument()
+  })
+
+  it('shows Take photo button on mobile devices', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(screen.getByRole('button', { name: 'Browse images' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Take photo' })).toBeInTheDocument()
+  })
+
+  it('shows Speak entry button on mobile when speech recognition is supported', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+    mockSpeechRecognition(true)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(screen.getByRole('button', { name: 'Speak entry' })).toBeInTheDocument()
+  })
+
+  it('hides Speak entry button on mobile when speech recognition is unavailable', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+    mockSpeechRecognition(false)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    expect(screen.queryByRole('button', { name: 'Speak entry' })).not.toBeInTheDocument()
+  })
+
+  it('appends recognized speech to entry content', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+    mockSpeechRecognition(true)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+    await user.type(screen.getByLabelText('Content'), 'Started writing')
+    await user.click(screen.getByRole('button', { name: 'Speak entry' }))
+
+    const recognition = MockSpeechRecognition.instances[0]
+
+    if (!recognition) {
+      throw new Error('Speech recognition instance not found')
+    }
+
+    recognition.emitFinalTranscript('using my voice')
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Content')).toHaveValue('Started writing using my voice')
+    })
+  })
+
+  it('camera input has capture attribute targeting rear camera', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    const cameraInput = getCameraInput()
+    expect(cameraInput.getAttribute('capture')).toBe('environment')
+    expect(cameraInput.getAttribute('accept')).toBe('image/jpeg,image/png,image/webp')
+  })
+
+  it('uploads photo taken via camera and includes it in submitted payload', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+
+    uploadMock.mockResolvedValue({
+      pathname: 'tmp/journals/journal-1/camera-photo.jpg',
+    })
+
+    const action = vi.fn(async () => ({
+      error: null,
+      redirectTo: '/dashboard/journals/journal-1',
+    }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+    await user.type(screen.getByLabelText('Title'), 'Camera entry')
+    await user.type(screen.getByLabelText('Content'), 'Taken with camera')
+
+    const photo = new File(['binary'], 'camera-photo.jpg', { type: 'image/jpeg' })
+    await user.upload(getCameraInput(), photo)
+
+    expect(await screen.findByText('Uploaded')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Create entry' }))
+
+    await waitFor(() => {
+      expect(action).toHaveBeenCalled()
+    })
+
+    expect(action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        uploadedImages: [
+          expect.objectContaining({
+            tempStorageKey: 'tmp/journals/journal-1/camera-photo.jpg',
+            fileName: 'camera-photo.jpg',
+            mimeType: 'image/jpeg',
+          }),
+        ],
+      }),
+    )
+  }, 15000)
+
+  it('hides both image buttons on mobile when max files are selected', async () => {
+    const user = userEvent.setup()
+
+    mockMatchMedia(true)
+
+    uploadMock.mockImplementation(async (_storageKey: string, file: File) => ({
+      pathname: `tmp/journals/journal-1/${file.name}`,
+    }))
+
+    const action = vi.fn(async () => ({ error: null, redirectTo: null }))
+    const cleanupAction = vi.fn(async () => ({ error: null }))
+
+    render(<CreateEntryModal journalId="journal-1" action={action} cleanupAction={cleanupAction} />)
+
+    await user.click(screen.getByRole('button', { name: 'Add entry' }))
+
+    const files = Array.from(
+      { length: ENTRY_IMAGE_MAX_FILES },
+      (_, index) => new File([`f${index}`], `img-${index}.jpg`, { type: 'image/jpeg' }),
+    )
+
+    for (const [index, file] of files.entries()) {
+      await user.upload(getFileInput(), file)
+
+      await waitFor(() => {
+        expect(screen.getAllByText('Uploaded')).toHaveLength(index + 1)
+      })
+    }
+
+    expect(screen.queryByRole('button', { name: 'Browse images' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Take photo' })).not.toBeInTheDocument()
+  }, 30000)
 })
